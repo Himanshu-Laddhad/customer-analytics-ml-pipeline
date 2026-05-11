@@ -1,7 +1,8 @@
 -- ============================================================
 -- RFM Feature Queries
 -- Source table : transactions  (outputs/retail_clean.parquet)
--- Snapshot date: MAX(InvoiceDate) in the dataset (~2011-12-09)
+-- Observation window : InvoiceDate < 2010-12-01  (features only)
+-- Snapshot date      : 2010-12-01  (recency reference point)
 -- All queries end with ';' so the notebook can split on ';\n'
 -- ============================================================
 
@@ -9,13 +10,14 @@
 -- ============================================================
 -- Query 1: RFM Base
 -- Per-customer recency, frequency, monetary value.
---   recency   = days between last purchase and snapshot date
---   frequency = count of distinct invoices
---   monetary  = total revenue (Quantity * Price)
+--   recency   = days between last obs-window purchase and 2010-12-01
+--   frequency = distinct invoices in observation window
+--   monetary  = total revenue in observation window
+-- Only transactions before 2010-12-01 are included to prevent
+-- leakage from the prediction window used to define churn labels.
 -- ============================================================
 WITH snapshot AS (
-    SELECT MAX(InvoiceDate) AS snapshot_date
-    FROM transactions
+    SELECT TIMESTAMP '2010-12-01 00:00:00' AS snapshot_date
 )
 SELECT
     t."Customer ID"                                        AS customer_id,
@@ -24,6 +26,7 @@ SELECT
     SUM(t.Quantity * t.Price)                              AS monetary
 FROM transactions t
 CROSS JOIN snapshot s
+WHERE t.InvoiceDate < TIMESTAMP '2010-12-01 00:00:00'
 GROUP BY t."Customer ID", s.snapshot_date
 ORDER BY customer_id
 ;
@@ -33,14 +36,14 @@ ORDER BY customer_id
 -- Joins extended behavioural features onto the RFM base.
 --   aov               = monetary / frequency (avg order value)
 --   purchase_velocity = invoices per day of customer lifetime
---   days_as_customer  = days between first and last purchase
---   unique_products   = distinct StockCodes purchased
+--   days_as_customer  = days between first and last obs-window purchase
+--   unique_products   = distinct StockCodes in observation window
 --   unique_countries  = distinct countries (usually 1)
+-- All CTEs filter to InvoiceDate < 2010-12-01 to prevent leakage.
 -- Self-contained: re-derives rfm_base internally via CTEs.
 -- ============================================================
 WITH snapshot AS (
-    SELECT MAX(InvoiceDate) AS snapshot_date
-    FROM transactions
+    SELECT TIMESTAMP '2010-12-01 00:00:00' AS snapshot_date
 ),
 rfm_base AS (
     SELECT
@@ -50,6 +53,7 @@ rfm_base AS (
         SUM(t.Quantity * t.Price)                              AS monetary
     FROM transactions t
     CROSS JOIN snapshot s
+    WHERE t.InvoiceDate < TIMESTAMP '2010-12-01 00:00:00'
     GROUP BY t."Customer ID", s.snapshot_date
 ),
 extended AS (
@@ -63,6 +67,7 @@ extended AS (
         COUNT(DISTINCT StockCode)                              AS unique_products,
         COUNT(DISTINCT Country)                                AS unique_countries
     FROM transactions
+    WHERE InvoiceDate < TIMESTAMP '2010-12-01 00:00:00'
     GROUP BY "Customer ID"
 )
 SELECT
@@ -86,13 +91,11 @@ ORDER BY customer_id
 -- boundaries used for train/test construction downstream.
 --   observation_end  = '2010-12-01'  (training feature cutoff)
 --   prediction_start = '2010-12-01'
---   prediction_end   = MAX(InvoiceDate) in the dataset
--- RFM features should be recomputed on data < observation_end
--- when building the actual train set in the modelling notebook.
+--   prediction_end   = MAX(InvoiceDate) in the full dataset
+-- RFM features are already scoped to < observation_end above.
 -- ============================================================
 WITH snapshot AS (
-    SELECT MAX(InvoiceDate) AS snapshot_date
-    FROM transactions
+    SELECT TIMESTAMP '2010-12-01 00:00:00' AS snapshot_date
 ),
 rfm_base AS (
     SELECT
@@ -102,6 +105,7 @@ rfm_base AS (
         SUM(t.Quantity * t.Price)                              AS monetary
     FROM transactions t
     CROSS JOIN snapshot s
+    WHERE t.InvoiceDate < TIMESTAMP '2010-12-01 00:00:00'
     GROUP BY t."Customer ID", s.snapshot_date
 )
 SELECT
@@ -109,10 +113,9 @@ SELECT
     r.recency,
     r.frequency,
     r.monetary,
-    CAST('2010-12-01' AS DATE)         AS observation_end,
-    CAST('2010-12-01' AS DATE)         AS prediction_start,
-    CAST(s.snapshot_date AS DATE)      AS prediction_end
+    CAST('2010-12-01' AS DATE)                               AS observation_end,
+    CAST('2010-12-01' AS DATE)                               AS prediction_start,
+    CAST((SELECT MAX(InvoiceDate) FROM transactions) AS DATE) AS prediction_end
 FROM rfm_base r
-CROSS JOIN snapshot s
 ORDER BY customer_id
 ;
